@@ -1,7 +1,6 @@
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Union
 
 import duckdb
 import pandas as pd
@@ -10,7 +9,7 @@ import pandas as pd
 class ParquetStorage:
     CHUNK_SIZE = 10000
 
-    def __init__(self, data_dir: Union[Path, str] = "data"):
+    def __init__(self, data_dir: Path | str = "data"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._existing_tickers: set[str] | None = None

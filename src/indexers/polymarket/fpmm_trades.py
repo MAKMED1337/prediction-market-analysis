@@ -4,7 +4,6 @@ import concurrent.futures
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from tqdm import tqdm
@@ -42,7 +41,7 @@ class FPMMTrade:
     outcome_index: int
     outcome_tokens: int  # outcomeTokensBought or outcomeTokensSold
     is_buy: bool
-    timestamp: Optional[int] = None
+    timestamp: int | None = None
 
     @property
     def price(self) -> float:
@@ -67,10 +66,10 @@ class PolymarketLegacyTradesIndexer(Indexer):
 
     def __init__(
         self,
-        from_block: Optional[int] = None,
-        to_block: Optional[int] = None,
-        chunk_size: int = 1000,
-        max_workers: int = 50,
+        from_block: int | None = None,
+        to_block: int | None = None,
+        chunk_size: int = 10000,
+        max_workers: int = 1,
     ):
         super().__init__(
             name="polymarket_fpmm_trades",

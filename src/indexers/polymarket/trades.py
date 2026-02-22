@@ -3,11 +3,11 @@
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from tqdm import tqdm
 
+from src.common.client import RateLimiter
 from src.common.indexer import Indexer
 from src.indexers.polymarket.blockchain import (
     CTF_EXCHANGE,
@@ -25,10 +25,15 @@ class PolymarketTradesIndexer(Indexer):
 
     def __init__(
         self,
-        from_block: Optional[int] = None,
-        to_block: Optional[int] = None,
-        chunk_size: int = 1000,
+        from_block: int | None = None,
+        to_block: int | None = None,
+        chunk_size: int = 1_00,
+        max_workers: int = 100,
+        rate_limiter: RateLimiter | None = None,
     ):
+        if not rate_limiter:
+            rate_limiter = RateLimiter(100)
+
         super().__init__(
             name="polymarket_trades",
             description="Backfills Polymarket trades from Polygon blockchain to parquet files",
@@ -36,6 +41,8 @@ class PolymarketTradesIndexer(Indexer):
         self._from_block = from_block
         self._to_block = to_block
         self._chunk_size = chunk_size
+        self._max_workers = max_workers
+        self._rate_limiter = rate_limiter
 
     def run(self) -> None:
         """Backfill all Polymarket trades from the Polygon blockchain.
@@ -47,7 +54,7 @@ class PolymarketTradesIndexer(Indexer):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         CURSOR_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-        client = PolygonClient()
+        client = PolygonClient(rate_limiter=self._rate_limiter)
         current_block = client.get_block_number()
 
         # Determine starting block
@@ -90,16 +97,40 @@ class PolymarketTradesIndexer(Indexer):
                         pass
             return max(indices) + BATCH_SIZE if indices else 0
 
+        chunk_idx = get_next_chunk_idx()
+
         def save_batch(trades_batch):
-            nonlocal total_saved
+            nonlocal total_saved, chunk_idx
             if not trades_batch:
                 return
-            chunk_idx = get_next_chunk_idx()
             chunk_path = DATA_DIR / f"trades_{chunk_idx}_{chunk_idx + BATCH_SIZE}.parquet"
+            chunk_idx += BATCH_SIZE
+
             df = pd.DataFrame(trades_batch)
             df.to_parquet(chunk_path)
             total_saved += len(trades_batch)
             tqdm.write(f"Saved {len(trades_batch)} trades to {chunk_path.name}")
+
+        def fetch_range(chunk: tuple[int, int]) -> tuple[tuple[int, int], list[dict]]:
+            fetched_at = datetime.utcnow()
+            local_trades = []
+
+            for contract_name, contract_address in contracts:
+                trades = client.get_trades(
+                    from_block=chunk[0],
+                    to_block=chunk[1],
+                    contract_address=contract_address,
+                )
+
+                for trade in trades:
+                    trade_dict = asdict(trade)
+                    # Convert large ints to strings to avoid parquet overflow
+                    trade_dict["maker_asset_id"] = str(trade_dict["maker_asset_id"])
+                    trade_dict["taker_asset_id"] = str(trade_dict["taker_asset_id"])
+                    trade_dict["_fetched_at"] = fetched_at
+                    trade_dict["_contract"] = contract_name
+                    local_trades.append(trade_dict)
+            return chunk, local_trades
 
         # Build list of chunk ranges
         ranges = []
@@ -109,57 +140,56 @@ class PolymarketTradesIndexer(Indexer):
             ranges.append((current, end))
             current = end + 1
 
-        # Process by block range, fetching from both contracts for each range
-        total_chunks = len(ranges)
-        pbar = tqdm(total=total_chunks, desc="Backfilling", unit=" chunks")
+        range_ptr = 0
+        waiting_to_save = {}
+
+        def save_progress(limit: int = BATCH_SIZE) -> None:
+            nonlocal all_trades, waiting_to_save, range_ptr
+
+            while True:
+                if range_ptr >= len(ranges):
+                    assert len(waiting_to_save) == 0
+                    break
+
+                range_ = ranges[range_ptr]
+                if range_ not in waiting_to_save:
+                    break
+                all_trades.extend(waiting_to_save.pop(range_))
+                range_ptr += 1
+
+            while len(all_trades) >= limit:
+                # In the end (non full blocks as well) we will store continues chunk up to last range
+                assert range_ptr > 0
+                CURSOR_FILE.write_text(str(ranges[range_ptr - 1][1]))
+                save_batch(all_trades[:BATCH_SIZE])
+                all_trades = all_trades[BATCH_SIZE:]
+
+        def process_result(result: tuple[tuple[int, int], list[dict]], pbar: tqdm) -> None:
+            nonlocal all_trades, waiting_to_save, range_ptr
+
+            chunk, blocks = result
+            waiting_to_save[chunk] = blocks
+            save_progress()
+
+            pbar.set_postfix(
+                block=ranges[range_ptr][1] if range_ptr < len(ranges) else "finished",
+                buffer=len(all_trades),
+                waiting_to_save=len(waiting_to_save),
+                saved=total_saved,
+            )
 
         try:
-            for chunk_start, chunk_end in ranges:
-                fetched_at = datetime.utcnow()
-
-                # Fetch from both contracts for this block range
-                for contract_name, contract_address in contracts:
-                    trades = client.get_trades(
-                        from_block=chunk_start,
-                        to_block=chunk_end,
-                        contract_address=contract_address,
-                    )
-
-                    for trade in trades:
-                        trade_dict = asdict(trade)
-                        # Convert large ints to strings to avoid parquet overflow
-                        trade_dict["maker_asset_id"] = str(trade_dict["maker_asset_id"])
-                        trade_dict["taker_asset_id"] = str(trade_dict["taker_asset_id"])
-                        trade_dict["_fetched_at"] = fetched_at
-                        trade_dict["_contract"] = contract_name
-                        all_trades.append(trade_dict)
-
-                # Update progress after both contracts processed for this range
-                pbar.update(1)
-                pbar.set_postfix(
-                    block=chunk_end,
-                    buffer=len(all_trades),
-                    saved=total_saved,
-                )
-
-                # Save in batches
-                while len(all_trades) >= BATCH_SIZE:
-                    save_batch(all_trades[:BATCH_SIZE])
-                    all_trades = all_trades[BATCH_SIZE:]
-
-                # Save cursor after both contracts processed for this range
-                CURSOR_FILE.write_text(str(chunk_end))
-
-        except KeyboardInterrupt:
-            print("\nInterrupted. Progress saved.")
+            self.process_with_workers(
+                ranges,
+                fetch_range,
+                process_result,
+                self._max_workers,
+                "Backfilling polymarket trades",
+            )
         finally:
-            pbar.close()
+            save_progress(1)
 
-        # Save remaining trades
-        if all_trades:
-            save_batch(all_trades)
-
-        if CURSOR_FILE.exists():
-            CURSOR_FILE.unlink()
+        # if CURSOR_FILE.exists():
+        #     CURSOR_FILE.unlink()
 
         print(f"\nBackfill complete: {total_saved} trades saved")

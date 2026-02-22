@@ -224,7 +224,7 @@ class MarketTypesAnalysis(Analysis):
 
         # Only show labels for rectangles large enough to fit text
         labels = []
-        for rect, (_, row) in zip(rects, df_treemap.iterrows()):
+        for rect, (_, row) in zip(rects, df_treemap.iterrows(), strict=True):
             area = rect["dx"] * rect["dy"]
             min_dim = min(rect["dx"], rect["dy"])
             if area > 50 and min_dim > 5:

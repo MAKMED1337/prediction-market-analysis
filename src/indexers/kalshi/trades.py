@@ -1,12 +1,10 @@
 """Indexer for Kalshi trades data."""
 
+import shutil
 import traceback
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-import shutil
 
 import duckdb
 import pandas as pd
@@ -28,8 +26,8 @@ class KalshiTradesIndexer(Indexer):
 
     def __init__(
         self,
-        min_ts: Optional[int] = None,
-        max_ts: Optional[int] = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
         max_workers: int = 10,
     ):
         super().__init__(
@@ -103,7 +101,7 @@ class KalshiTradesIndexer(Indexer):
             next_chunk_idx += BATCH_SIZE
             return len(trades_batch)
 
-        def fetch_ticker_trades(ticker: str) -> tuple[str, Optional[list[dict]]]:
+        def fetch_ticker_trades(ticker: str) -> tuple[str, list[dict] | None]:
             """Fetch trades for a single ticker."""
             client = KalshiClient()
             try:
@@ -123,48 +121,33 @@ class KalshiTradesIndexer(Indexer):
             finally:
                 client.close()
 
-        MAX_PENDING = self._max_workers * 2  # Tune as needed
-        pending = set()
-        tickers_iter = iter(tickers_to_process)
-        pbar = tqdm(total=len(tickers_to_process), desc="Fetching trades")
+        def process_result(result: tuple[str, list[dict] | None], pbar: tqdm):
+            nonlocal all_trades, total_trades_saved
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            # Submit initial futures
-            for _ in range(min(MAX_PENDING, len(tickers_to_process))):
-                ticker = next(tickers_iter)
-                future = executor.submit(fetch_ticker_trades, ticker)
-                pending.add(future)
+            ticker, trades_data = result
+            if trades_data:  # Handles both error and empty result
+                all_trades.extend(trades_data)
 
-            while pending:
-                # Wait for at least one future to complete
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    ticker, trades_data = future.result()
-                    if trades_data:  # Handles both error and empty result
-                        all_trades.extend(trades_data)
+            pbar.set_postfix(buffer=len(all_trades), saved=total_trades_saved, last=ticker[-20:])
 
-                    pbar.set_postfix(buffer=len(all_trades), saved=total_trades_saved, last=ticker[-20:])
+            # Save in batches
+            while len(all_trades) >= BATCH_SIZE:
+                saved = save_batch(all_trades[:BATCH_SIZE])
+                total_trades_saved += saved
+                all_trades = list(all_trades[BATCH_SIZE:])
 
-                    # Save in batches
-                    while len(all_trades) >= BATCH_SIZE:
-                        saved = save_batch(all_trades[:BATCH_SIZE])
-                        total_trades_saved += saved
-                        all_trades = list(all_trades[BATCH_SIZE:])
-                    pbar.update(1)
-
-                # Submit new futures to replace the completed ones
-                for _ in range(len(done)):
-                    try:
-                        ticker = next(tickers_iter)
-                        pending.add(executor.submit(fetch_ticker_trades, ticker))
-                    except StopIteration:
-                        break
-
-        pbar.close()
-
-        # Save remaining
-        if all_trades:
-            total_trades_saved += save_batch(all_trades)
+        try:
+            self.process_with_workers(
+                tickers_to_process,
+                fetch_ticker_trades,
+                process_result,
+                self._max_workers,
+                "Fetching trades",
+            )
+        finally:
+            # Save remaining
+            if all_trades:
+                total_trades_saved += save_batch(all_trades)
 
         print(
             f"\nBackfill trades complete: {len(tickers_to_process)} markets processed, "

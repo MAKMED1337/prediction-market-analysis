@@ -1,14 +1,20 @@
 """Fetch Polymarket trades directly from the Polygon blockchain."""
 
 import concurrent.futures
+import json
 import os
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Optional
 
+import glaciers as gl
+import polars as pl
 from dotenv import load_dotenv
 from web3 import Web3
+from web3.contract import Contract
 from web3.middleware import ExtraDataToPOAMiddleware
+from web3.types import LogReceipt
+
+from src.common.client import RateLimiter, RetryError, retry_request
 
 load_dotenv()
 
@@ -55,7 +61,7 @@ class BlockchainTrade:
     maker_amount: int  # In smallest units (6 decimals for USDC)
     taker_amount: int
     fee: int
-    timestamp: Optional[int] = None  # Block timestamp
+    timestamp: int | None = None  # Block timestamp
 
     @property
     def is_buy(self) -> bool:
@@ -102,7 +108,7 @@ class BlockchainTrade:
 class PolygonClient:
     """Client for fetching Polymarket trades from Polygon blockchain."""
 
-    def __init__(self, rpc_url: Optional[str] = None):
+    def __init__(self, rpc_url: str | None = None, rate_limiter: RateLimiter | None = None):
         self.rpc_url = rpc_url or POLYGON_RPC
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 30}))
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -114,6 +120,8 @@ class PolygonClient:
             abi=[ORDER_FILLED_ABI],
         )
 
+        self.rate_limiter = rate_limiter or RateLimiter(int(1e9))
+
     def get_block_number(self) -> int:
         """Get current block number."""
         return self.w3.eth.block_number
@@ -123,25 +131,48 @@ class PolygonClient:
         block = self.w3.eth.get_block(block_number)
         return block["timestamp"]
 
-    def _decode_order_filled(self, log: dict, contract) -> BlockchainTrade:
+    def _decode_order_filled(self, logs: list[LogReceipt], contract: Contract) -> list[BlockchainTrade]:
         """Decode an OrderFilled event log."""
-        decoded = contract.events.OrderFilled().process_log(log)
-        args = decoded["args"]
+        abi_df = gl.read_new_abi_json(json.dumps([ORDER_FILLED_ABI]), contract.address)
 
-        return BlockchainTrade(
-            block_number=log["blockNumber"],
-            transaction_hash=log["transactionHash"].hex(),
-            log_index=log["logIndex"],
-            order_hash=args["orderHash"].hex(),
-            maker=args["maker"],
-            taker=args["taker"],
-            maker_asset_id=args["makerAssetId"],
-            taker_asset_id=args["takerAssetId"],
-            maker_amount=args["makerAmountFilled"],
-            taker_amount=args["takerAmountFilled"],
-            fee=args["fee"],
+        df = pl.DataFrame(logs)
+        if df.is_empty():
+            return []
+
+        df = (  # Make it compatible with glaciers, expand topics and convert address to hex
+            (df)
+            .with_columns(pl.col("address").str.slice(2).cast(pl.Binary).bin.decode("hex"))
+            .with_columns(pl.col("topics").list.get(i).alias(f"topic{i}") for i in range(4))
         )
 
+        decoded = gl.decode_df_with_abi_df("log", df, abi_df)
+
+        result = []
+        for log, args_json in zip(logs, decoded.get_column("event_json"), strict=True):
+            args = {i["name"]: i["value"] for i in json.loads(args_json)}
+            order_hash: str = args["orderHash"]  # For some reason it has 0x0xAAA...
+            assert order_hash.startswith("0x0x")
+            order_hash = order_hash[4:]
+
+            result.append(
+                BlockchainTrade(
+                    block_number=log["blockNumber"],
+                    transaction_hash=log["transactionHash"].hex(),
+                    log_index=log["logIndex"],
+                    order_hash=args["orderHash"],
+                    maker=args["maker"],
+                    taker=args["taker"],
+                    maker_asset_id=args["makerAssetId"],
+                    taker_asset_id=args["takerAssetId"],
+                    maker_amount=args["makerAmountFilled"],
+                    taker_amount=args["takerAmountFilled"],
+                    fee=args["fee"],
+                )
+            )
+
+        return result
+
+    @retry_request()
     def get_trades(
         self,
         from_block: int,
@@ -151,24 +182,20 @@ class PolygonClient:
         """Fetch OrderFilled events from a block range."""
         contract = self.ctf_exchange if contract_address.lower() == CTF_EXCHANGE.lower() else self.negrisk_exchange
 
-        logs = self.w3.eth.get_logs(
-            {
-                "address": Web3.to_checksum_address(contract_address),
-                "topics": [ORDER_FILLED_TOPIC],
-                "fromBlock": from_block,
-                "toBlock": to_block,
-            }
-        )
-
-        trades = []
-        for log in logs:
+        with self.rate_limiter:
             try:
-                trade = self._decode_order_filled(log, contract)
-                trades.append(trade)
-            except BaseException as e:
-                print(f"Error decoding log: {e}")
-
-        return trades
+                logs = self.w3.eth.get_logs(
+                    {
+                        "address": Web3.to_checksum_address(contract_address),
+                        "topics": [ORDER_FILLED_TOPIC],
+                        "fromBlock": from_block,
+                        "toBlock": to_block,
+                    }
+                )
+            except json.JSONDecodeError as e:
+                print(f"Error getting logs: {e}")
+                raise RetryError from e
+        return self._decode_order_filled(logs, contract)
 
     def _fetch_chunk(self, start: int, end: int, contract_address: str) -> tuple[list[BlockchainTrade], int, int]:
         """Fetch a single chunk of trades. Used by thread pool."""
@@ -189,7 +216,7 @@ class PolygonClient:
     def iter_trades(
         self,
         from_block: int,
-        to_block: Optional[int] = None,
+        to_block: int | None = None,
         chunk_size: int = 1000,
         contract_address: str = CTF_EXCHANGE,
         max_workers: int = 5,

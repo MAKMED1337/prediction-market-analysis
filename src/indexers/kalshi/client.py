@@ -1,5 +1,4 @@
 from collections.abc import Generator
-from typing import Optional
 
 import httpx
 
@@ -24,7 +23,7 @@ class KalshiClient:
         self.client.close()
 
     @retry_request()
-    def _get(self, path: str, params: Optional[dict] = None) -> dict:
+    def _get(self, path: str, params: dict | None = None) -> dict:
         """Make a GET request with retry/backoff."""
         response = self.client.get(path, params=params)
         response.raise_for_status()
@@ -39,8 +38,8 @@ class KalshiClient:
         ticker: str,
         limit: int = 1000,
         verbose: bool = True,
-        min_ts: Optional[int] = None,
-        max_ts: Optional[int] = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
     ) -> list[Trade]:
         all_trades = []
         cursor = None
@@ -98,10 +97,10 @@ class KalshiClient:
     def iter_markets(
         self,
         limit: int = 200,
-        cursor: Optional[str] = None,
-        min_close_ts: Optional[int] = None,
-        max_close_ts: Optional[int] = None,
-    ) -> Generator[tuple[list[Market], Optional[str]], None, None]:
+        cursor: str | None = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
+    ) -> Generator[tuple[list[Market], str | None], None, None]:
         while True:
             params = {"limit": limit}
             if cursor:

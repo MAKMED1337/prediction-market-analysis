@@ -207,7 +207,7 @@ class LongshotVolumeShareOverTimeAnalysis(Analysis):
             "81_90",
             "91_99",
         ]
-        bucket_key_map = dict(zip(bucket_order, bucket_keys))
+        bucket_key_map = dict(zip(bucket_order, bucket_keys, strict=True))
 
         chart_data = [
             {

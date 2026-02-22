@@ -3,9 +3,8 @@
 import concurrent.futures
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 from tqdm import tqdm
@@ -30,7 +29,7 @@ class PolymarketBlocksIndexer(Indexer):
             description="Fetches block timestamps for every block",
         )
 
-    def _fetch_timestamp(self, client: PolygonClient, block_number: int) -> Optional[tuple[int, int]]:
+    def _fetch_timestamp(self, client: PolygonClient, block_number: int) -> tuple[int, int] | None:
         """Fetch timestamp for a single block. Returns (block_number, unix_timestamp)."""
         try:
             unix_timestamp = client.get_block_timestamp(block_number)
@@ -54,13 +53,13 @@ class PolymarketBlocksIndexer(Indexer):
             for block in range(block_a, block_b):
                 offset = block - block_a
                 interpolated_ts = ts_a + (ts_diff * offset) // block_diff
-                timestamp_str = datetime.fromtimestamp(interpolated_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                timestamp_str = datetime.fromtimestamp(interpolated_ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 records.append({"block_number": block, "timestamp": timestamp_str})
 
         # Add the last sampled block
         if sampled_sorted:
             last_block, last_ts = sampled_sorted[-1]
-            timestamp_str = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            timestamp_str = datetime.fromtimestamp(last_ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             records.append({"block_number": last_block, "timestamp": timestamp_str})
 
         return records

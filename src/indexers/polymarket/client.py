@@ -1,5 +1,4 @@
 from collections.abc import Generator
-from typing import Optional, Union
 
 import httpx
 
@@ -30,7 +29,7 @@ class PolymarketClient:
         self.client.close()
 
     @retry_request()
-    def _get(self, url: str, params: Optional[dict] = None) -> Union[dict, list]:
+    def _get(self, url: str, params: dict | None = None) -> dict | list:
         """Make a GET request with retry/backoff."""
         response = self.client.get(url, params=params)
         response.raise_for_status()

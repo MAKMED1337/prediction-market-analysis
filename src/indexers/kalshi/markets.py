@@ -1,7 +1,6 @@
 """Indexer for Kalshi markets data."""
 
 from pathlib import Path
-from typing import Optional
 
 from src.common.indexer import Indexer
 from src.common.storage import ParquetStorage
@@ -16,8 +15,8 @@ class KalshiMarketsIndexer(Indexer):
 
     def __init__(
         self,
-        min_close_ts: Optional[int] = None,
-        max_close_ts: Optional[int] = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
     ):
         super().__init__(
             name="kalshi_markets",

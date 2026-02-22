@@ -18,7 +18,15 @@ from __future__ import annotations
 import importlib
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from typing import TypeVar
+
+from tqdm import tqdm
+
+T = TypeVar("T")
+U = TypeVar("U")
 
 
 class Indexer(ABC):
@@ -69,3 +77,47 @@ class Indexer(ABC):
                     indexers.append(obj)
 
         return indexers
+
+    @classmethod
+    def process_with_workers(
+        cls,
+        data_to_process: list[T],
+        fetch: Callable[[T], U],
+        callback: Callable[[U, tqdm], None],
+        max_workers: int,
+        description: str,
+    ):
+        MAX_PENDING = max_workers * 2
+        pending = set()
+        tickers_iter = iter(data_to_process)
+        pbar = tqdm(total=len(data_to_process), desc=description)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit initial futures
+            for _ in range(min(MAX_PENDING, len(data_to_process))):
+                ticker = next(tickers_iter)
+                future = executor.submit(fetch, ticker)
+                pending.add(future)
+
+            while pending:
+                # Wait for at least one future to complete
+                try:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                except:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
+
+                # Submit new futures to replace the completed ones
+                for _ in range(len(done)):
+                    try:
+                        ticker = next(tickers_iter)
+                        pending.add(executor.submit(fetch, ticker))
+                    except StopIteration:
+                        break
+
+                # Process the result
+                for future in done:
+                    callback(future.result(), pbar)
+                    pbar.update(1)
+
+        pbar.close()

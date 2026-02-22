@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -16,13 +15,13 @@ class Market:
     liquidity: float
     active: bool
     closed: bool
-    end_date: Optional[datetime]
-    created_at: Optional[datetime]
-    market_maker_address: Optional[str] = None  # FPMM address for legacy markets
+    end_date: datetime | None
+    created_at: datetime | None
+    market_maker_address: str | None = None  # FPMM address for legacy markets
 
     @classmethod
     def from_dict(cls, data: dict) -> "Market":
-        def parse_time(val: Optional[str]) -> Optional[datetime]:
+        def parse_time(val: str | None) -> datetime | None:
             if not val:
                 return None
             try:

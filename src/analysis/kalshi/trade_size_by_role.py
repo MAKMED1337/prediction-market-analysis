@@ -136,6 +136,7 @@ class TradeSizeByRoleAnalysis(Analysis):
             zip(
                 [mean_sizes["taker"], mean_sizes["maker"]],
                 [median_sizes["taker"], median_sizes["maker"]],
+                strict=True,
             )
         ):
             ax.annotate(f"${mean:.0f}", (i - width / 2, mean), ha="center", va="bottom", fontsize=9)

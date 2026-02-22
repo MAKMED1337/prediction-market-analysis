@@ -1,7 +1,6 @@
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 def parse_datetime(val: str) -> datetime:
@@ -49,22 +48,22 @@ class Market:
     yes_sub_title: str
     no_sub_title: str
     status: str
-    yes_bid: Optional[int]
-    yes_ask: Optional[int]
-    no_bid: Optional[int]
-    no_ask: Optional[int]
-    last_price: Optional[int]
+    yes_bid: int | None
+    yes_ask: int | None
+    no_bid: int | None
+    no_ask: int | None
+    last_price: int | None
     volume: int
     volume_24h: int
     open_interest: int
     result: str
-    created_time: Optional[datetime]
-    open_time: Optional[datetime]
-    close_time: Optional[datetime]
+    created_time: datetime | None
+    open_time: datetime | None
+    close_time: datetime | None
 
     @classmethod
     def from_dict(cls, data: dict) -> "Market":
-        def parse_time(val: Optional[str]) -> Optional[datetime]:
+        def parse_time(val: str | None) -> datetime | None:
             if not val:
                 return None
             return parse_datetime(val)
